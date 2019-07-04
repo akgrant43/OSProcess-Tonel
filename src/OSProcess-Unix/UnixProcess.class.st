@@ -1017,7 +1017,8 @@ UnixProcess class >> waitForCommandOutputArray: aCommandString [
 
 { #category : #private }
 UnixProcess >> argsAsFlatArrayAndOffsets: anArrayOfNullTerminatedStrings [
-	"Given anArrayOfNullTerminatedStrings, flatten the array into a string buffer,
+	"Given anArrayOfNullTerminatedStrings (each string should be UTF8 encoded in a 
+	ByteArray ending with the null character (0)), flatten the array into a string buffer,
 	leaving space at the beginning of the buffer for a list of C pointers. Answer
 	the string buffer and an array of address offsets. The address offsets may later
 	be converted to C pointers and overlaid on the beginning of the buffer, resulting
@@ -1036,9 +1037,9 @@ UnixProcess >> argsAsFlatArrayAndOffsets: anArrayOfNullTerminatedStrings [
 		+ ((anArrayOfNullTerminatedStrings size + 1) * self processAccessor sizeOfPointer).
 	"Flatten the strings out into a buffer, leaving room at the
 	beginning of the buffer for an array of addresses."
-	flatStringArray := String new: arraySize.
+	flatStringArray := ByteArray new: arraySize.
 	ws := WriteStream on: flatStringArray.
-	offset timesRepeat: [ws nextPut: (Character value: 0)].
+	offset timesRepeat: [ws nextPut: 0 "NULL terminator"].
 	anArrayOfNullTerminatedStrings do: [:e | ws nextPutAll: e].
 	"Find address offsets to be used in creating the addresses for the strings."
 	ws := WriteStream on: (Array new: anArrayOfNullTerminatedStrings size).
@@ -1055,6 +1056,25 @@ UnixProcess >> arguments [
 
 	^ arguments
 
+]
+
+{ #category : #converting }
+UnixProcess >> asNullTerminatedByteArray: aStringOrByteArray [
+	"Answer the supplied String or ByteArray as a null terminated ByteArray.
+	If the input is a ByteArray, just add the null terminator.
+	If the input is a ByteString, assume it is ascii and convert appropriately.
+	If the input is a WideString, assume it is to be UTF8 encoded."
+
+	| nullTerminated |
+
+	(aStringOrByteArray isByteString or: [ aStringOrByteArray class == ByteArray ]) ifTrue: [ 
+		nullTerminated := ByteArray new: aStringOrByteArray size + 1.
+		^nullTerminated replaceFrom: 1 to: aStringOrByteArray size with: aStringOrByteArray startingAt: 1 ].
+
+	aStringOrByteArray isWideString ifTrue: [ 
+		^aStringOrByteArray utf8Encoded, #[0] ].
+
+	^self error: 'Unsupported program / argument string'
 ]
 
 { #category : #environment }
@@ -1595,18 +1615,17 @@ UnixProcess >> processProxy: anExternalProcess forkAndExec: executableFile argum
 	calling the primitive, including null termination of all strings. anExternalProcess is an
 	object which represents the new child process, and which responds to the #pid: message."
 
-	| nullString progName args argVecAndOffsets argVec argOffsets
+	| progName args argVecAndOffsets argVec argOffsets
 	envVecAndOffsets envVec envOffsets in out err childPid pwd |
 	stdOut ifNil: [^ nil].
-	nullString := (Character value: 0) asString.
-	progName := executableFile, nullString.		"Null terminated string"
+	progName := self asNullTerminatedByteArray: executableFile.
 	arrayOfStrings isNil							"Should be a (possibly empty) array"
 		ifTrue:
 			[args := Array with: progName]		"First argument is the program name (Unix convention)"
 		ifFalse:
 			[args := (OrderedCollection new: arrayOfStrings size + 2)
 						add: progName;
-						addAll: (arrayOfStrings collect: [:e | e, nullString ]);	"Null terminate each string"
+						addAll: (arrayOfStrings collect: [:e | self asNullTerminatedByteArray: e ]);
 						yourself;
 						asArray].
 	argVecAndOffsets := self argsAsFlatArrayAndOffsets: args.
@@ -1641,7 +1660,7 @@ UnixProcess >> processProxy: anExternalProcess forkAndExec: executableFile argum
 	pwd := anExternalProcess pwd.
 	(pwd = self getCwd)
 		ifTrue: [pwd := nil]
-		ifFalse: [pwd := pwd, nullString].
+		ifFalse: [pwd := self asNullTerminatedByteArray: pwd].
 	childPid := self processAccessor
 				forkAndExec: progName
 				stdIn: in
